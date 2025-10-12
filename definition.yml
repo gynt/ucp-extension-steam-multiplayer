@@ -1,0 +1,7 @@
+name: steam-multiplayer
+display-name: Steam Multiplayer
+version: 1.0.0
+type: module
+author: Gynt
+meta:
+  version: 1.0.0
