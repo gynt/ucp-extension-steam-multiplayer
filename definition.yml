@@ -1,6 +1,6 @@
 name: steam-multiplayer
 display-name: Steam Multiplayer (beta)
-version: 1.0.0
+version: 1.0.1
 type: module
 author: Gynt
 meta:
