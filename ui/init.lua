@@ -1,7 +1,7 @@
 
----@type Module_UI
-local ui = modules.ui
-local access = ui:access()
+-- ---@type Module_UI
+-- local ui = modules.ui
+-- local access = ui:access()
 
 local function initialize()
     -- log(VERBOSE, string.format("initialize()"))

@@ -1,0 +1,14 @@
+meta:
+  version: 1.0.0
+options:
+  - category:
+    - Steam Multiplayer
+    name: write_appid
+    hasHeader: false
+    header: "Detect game variant upon launch and set steam_appid.txt"
+    text: "Steam may be confused on which game variant you launch if not launched from within Steam. This feature sets Steam's meta file so it recognizes it correctly."
+    display: UCP2Switch
+    url: steam-multiplayer.steam_appid.write
+    contents:
+      type: boolean
+      value: true
