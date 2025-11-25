@@ -5,3 +5,7 @@ type: module
 author: Gynt
 meta:
   version: 1.0.0
+dependencies:
+  ui: "^1.0.0"
+  framework: ">=3.0.7"
+  frontend: ">=1.0.13"
