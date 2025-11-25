@@ -1,6 +1,10 @@
 -- should be shipped but doesn't need to be loaded explicitly
 -- local steamApiHandle = core.openLibraryHandle("ucp/modules/steam-multiplayer/steam_api.dll")
 local function setSteamAppIdFile()
+
+  local APP_ID_CRUSADER = 40970
+  local APP_ID_CRUSADER_EXTREME = 16700
+
   if #arg > 0 then
     log(VERBOSE, string.format("writing steamapp_id.txt file"))
     local haystack = (arg[1] or ''):lower()
@@ -8,17 +12,25 @@ local function setSteamAppIdFile()
     local needle2 = ("Stronghold_Crusader_Extreme.exe"):lower()
     local s1, e1 = haystack:find(needle1)
     local s2, e2 = haystack:find(needle2)
+
+    local appid = nil
     if s2 ~= nil and e2 ~= nil and e2 == haystack:len() then
-      log(VERBOSE, string.format("writing steamapp_id.txt file for Extreme: 16700"))
-      local f, err = io.open("steam_appid.txt", 'w')
-      if not f then error(err) end
-      f:write("16700")
-      f:close()
+      appid = APP_ID_CRUSADER_EXTREME
     elseif s1 ~= nil and e1 ~= nil and e1 == haystack:len() then
-      log(VERBOSE, string.format("writing steamapp_id.txt file for Crusader: 40970"))
+      appid = APP_ID_CRUSADER
+    else
+      if data.version.isExtreme() then
+        appid = APP_ID_CRUSADER_EXTREME
+      else
+        appid = APP_ID_CRUSADER
+      end
+    end
+
+    if appid ~= nil then
       local f, err = io.open("steam_appid.txt", 'w')
       if not f then error(err) end
-      f:write("40970")
+      log(VERBOSE, string.format("writing steamapp_id.txt file for game variant: %s", appid))
+      f:write(string.format("%i", appid))
       f:close()
     else
       log(VERBOSE, string.format("leaving steamapp_id.txt untouched: could not identify game variant"))
