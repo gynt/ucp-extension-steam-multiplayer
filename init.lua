@@ -108,13 +108,17 @@ local _, pNextModalDialog = utils.AOBExtract("C7 ? I(? ? ? ?) ? ? ? ? 89 ? ? ? ?
 local WAITING_FOR_HOST = 21
 local _, pIsHost = utils.AOBExtract("A3 I(? ? ? ?) 0F ? ? ? ? ? 8B CF")
 local pIsEqualGUID = core.AOBScan("8B 44 24 08 8B 4C 24 04 56 57 BE 10 00 00 00")
-local pPostLobbyNameCompare, sizePostLobbyNameCompare = core.AOBScan("83 C4 08 85 C0 0F ? ? ? ? ? 8B ? ? ? ? ? ? 8B 08"), 5
+local pPostLobbyNameCompare, sizePostLobbyNameCompare = core.AOBScan("83 C4 08 85 C0 0F ? ? ? ? ? 8B ? ? ? ? ? ? 8B 08 89 ? ? ? ? ? 8B 50 04 89 ? ? ? ? ? 8B 48 08"), 5
+log(VERBOSE, string.format("pPostLobbyNameCompare: %X", pPostLobbyNameCompare))
 
 local _, pSessionGUIDs = utils.AOBExtract("8B ? ? I(? ? ? ?) 8B 08 89 ? ? ? ? ? ")
 
 local function insertPostLobbyNameCompareHook()
+  core.writeCode(pPostLobbyNameCompare, {0x90, 0x90, 0x90, 0x90, 0x90, })
   core.insertCode(pPostLobbyNameCompare, sizePostLobbyNameCompare, {
-    core.allocateAssembly([[
+    core.AssemblyLambda([[
+      add esp, 0x8 ; original code
+
       push eax                            ; store eax
       mov eax, dword [pForceSteamworks]   ; fetch if there is steam guid value
       cmp eax, 1                          ; test against true
@@ -147,16 +151,22 @@ local function insertPostLobbyNameCompareHook()
     pGUID = locations.pGUID,
     isEqualGUID = pIsEqualGUID,
     pSessionGUIDs = pSessionGUIDs,
-  })}, nil, 'before')
+  })}, nil, 'after')
 end
 
 local pSteamworksGUID = core.allocate(16, true)
 core.writeBytes(pSteamworksGUID, { 0xFB, 0x59, 0xEF, 0xF7, 0x02, 0xFA, 0xCE, 0x45, 0xBC, 0x36, 0x7B, 0xF1, 0xD0, 0xF6, 0xBC, 0xE5, })
 
+
 local pGetGUIDForSelectedProvider, sizeGetGUIDForSelectedProvider = core.AOBScan("83 B9 8C 02 00 00 00"), 7
+log(VERBOSE, string.format("pGetGUIDForSelectedProvider: %X", pGetGUIDForSelectedProvider))
 local function insertGetGUIDForSelectedProviderHook()
   core.insertCode(pGetGUIDForSelectedProvider, sizeGetGUIDForSelectedProvider, {
     core.AssemblyLambda([[
+      mov eax, dword [pForceSteamworks] ; if force steamworks
+      cmp eax, 0
+      je original
+
       mov eax, dword [esp + 4] ; first parameter contains guid pointer (destination)
       push ecx
       mov ecx, dword [pSteamworksGUID]
@@ -167,14 +177,19 @@ local function insertGetGUIDForSelectedProviderHook()
       mov dword [eax + 0x8], ecx
       mov ecx, dword [pSteamworksGUID + 0xC]
       mov dword [eax + 0xC], ecx
+    cleanup:
       pop ecx
+      ret 0x4
+    original:
     ]], {
       pSteamworksGUID = pSteamworksGUID,
+      pForceSteamworks = locations.pForceSteamworks,
     })
   },nil, "after")
 end
 
 local pDisconnectDPlayHook, sizeDisconnectDPlayHook = core.AOBScan("89 AE 8C 02 00 00"), 6
+log(VERBOSE, string.format("pDisconnectDPlayHook: %X", pDisconnectDPlayHook))
 local function insertDisconnectDPlayHook()
   core.insertCode(pDisconnectDPlayHook, sizeDisconnectDPlayHook, {
     core.AssemblyLambda([[
@@ -187,6 +202,24 @@ end
 
 local pHandleCommandLineArgumentsEvent, sizeHandleCommandLineArgumentsEvent = core.AOBScan("8B 8C 24 14 04 00 00"), 7
 
+local pLoopImprovementInsert, sizeLoopImprovementInsert = core.AOBScan("3B ? ? ? ? ? 0F ? ? ? ? ? 5F 8B 4C 24 58"), 6
+
+local function insertLoopImprovement()
+  core.insertCode(pLoopImprovementInsert, sizeLoopImprovementInsert,
+  {
+    core.AssemblyLambda([[
+      mov eax, dword [pMultiplayerInitStep]
+      cmp eax, 2
+      jl original
+    doBreak:
+      jmp breakPoint
+    original:
+    ]], {
+      pMultiplayerInitStep = pMultiplayerInitStep,
+      breakPoint = pLoopImprovementInsert + 6 + 6,
+    })
+  }, nil, 'after')
+end
 
 return {
   enable = function(self, config)
@@ -210,7 +243,7 @@ return {
         local guidBytes = lobbyIDToGUIDBytes(lobbyID)
         core.writeBytes(locations.pGUID, guidBytes)
         core.writeInteger(locations.pForceSteamworks, 1) -- force is to true
-        log(VERBOSE, string.format("wrote lobby id to memory: %s", lobbyID))
+        log(VERBOSE, string.format("wrote lobby id to memory: %s GUID=%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X", lobbyID, table.unpack(guidBytes)))
 
         core.writeInteger(pIsHost, 0)
         core.writeInteger(pNextModalDialog, WAITING_FOR_HOST)
@@ -225,6 +258,14 @@ return {
     insertPostLobbyNameCompareHook()
     insertGetGUIDForSelectedProviderHook()
     insertDisconnectDPlayHook()
+    insertLoopImprovement()
+
+    local o
+    o = core.hookCode(function(this, join)
+      log(WARNING, string.format("createOrJoinSession(join=%s)", join))
+      log(WARNING, string.format("multiplayerInitStep: %s", core.readInteger(pMultiplayerInitStep)))
+      return o(this, join)
+    end, core.AOBScan("83 EC 5C A1 ? ? ? ? 33 C4 89 44 24 58 53"), 2, 1, 3 + 5)
   end,
 
   disable = function(self, config)
