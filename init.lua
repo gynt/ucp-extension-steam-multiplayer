@@ -54,13 +54,172 @@ end
 local function detectSteamLobbyConnectArguments()
   -- arg is a global specifying the raw arguments of the process
   for index, a in ipairs(arg) do
-    if arg == "+connect_lobby" then
-      return arg[index + 1]
+    if a == "+connect_lobby" then
+      return tonumber(arg[index + 1]) -- lobby id: e.g. 109775243988447845 (middle part of steam://joinlobby/16700/109775243988447845/more numbers)
     end
   end
+  return nil
 end
 
-local ui = require("ui")
+local function lobbyIDToGUIDBytes(lobbyID)
+  local bytes = {}
+  local data1 = (lobbyID >> 32) & 0xFFFFFFFF
+  local data2 = (lobbyID >> 16) & 0xFFFF
+  local data3 = lobbyID & 0xFFFF
+  local data4 = table.pack(string.byte("STEAMID", 1, -1))
+  table.insert(data4, 0) -- append 0 byte
+  data4.n = nil
+
+  for _, v in ipairs(core.itob(data1)) do
+    table.insert(bytes, v)
+  end
+  for _, v in ipairs(core.stob(data2)) do
+    table.insert(bytes, v)
+  end
+  for _, v in ipairs(core.stob(data3)) do
+    table.insert(bytes, v)
+  end
+  for i=1,8 do
+    table.insert(bytes, data4[i])
+  end
+
+  if #bytes ~= 16 then
+    error(string.format("invalid bytes: %s", json:encode(bytes)))
+  end
+
+  return bytes
+end
+
+local function allocateDataLocations()
+  return {
+    pGUID = core.allocate(16, true),
+    pForceSteamworks = core.allocate(4, true),
+  }
+end
+
+local locations
+
+local pSwitchToMenu = core.AOBScan("55 8B 6C 24 08 83 FD 17")
+local _, pGameCore = utils.AOBExtract("B9 I(? ? ? ?) C7 87 84 02 00 00 15 00 00 00")
+local _switchToMenu = core.exposeCode(pSwitchToMenu, 3, 1)
+
+local _, pMultiplayerInitStep = utils.AOBExtract("39 ? I(? ? ? ?) 56 89 ? ? ? ? ?")
+local _, pNextModalDialog = utils.AOBExtract("C7 ? I(? ? ? ?) ? ? ? ? 89 ? ? ? ? ? 89 ? ? ? ? ? C7 ? ? ? ? ? ? ? ? ? 89 ? ? ? ? ? 89 ? ? ? ? ? 89 ? ? ? ? ? 89 ? ? ? ? ? 89 ? ? ? ? ? 89 ? ? ? ? ? 6A 13")
+local WAITING_FOR_HOST = 21
+local _, pIsHost = utils.AOBExtract("A3 I(? ? ? ?) 0F ? ? ? ? ? 8B CF")
+local pIsEqualGUID = core.AOBScan("8B 44 24 08 8B 4C 24 04 56 57 BE 10 00 00 00")
+local pPostLobbyNameCompare, sizePostLobbyNameCompare = core.AOBScan("83 C4 08 85 C0 0F ? ? ? ? ? 8B ? ? ? ? ? ? 8B 08 89 ? ? ? ? ? 8B 50 04 89 ? ? ? ? ? 8B 48 08"), 5
+log(VERBOSE, string.format("pPostLobbyNameCompare: %X", pPostLobbyNameCompare))
+
+local _, pSessionGUIDs = utils.AOBExtract("8B ? ? I(? ? ? ?) 8B 08 89 ? ? ? ? ? ")
+
+local function insertPostLobbyNameCompareHook()
+  core.writeCode(pPostLobbyNameCompare, {0x90, 0x90, 0x90, 0x90, 0x90, })
+  core.insertCode(pPostLobbyNameCompare, sizePostLobbyNameCompare, {
+    core.AssemblyLambda([[
+      add esp, 0x8 ; original code
+
+      push eax                            ; store eax
+      mov eax, dword [pForceSteamworks]   ; fetch if there is steam guid value
+      cmp eax, 1                          ; test against true
+      jne original                        ; if not true, do the original code (not in steamworks mode)
+    modification:
+      mov eax, dword [edi * 4 + pSessionGUIDs]  ; get pointer to GUID received from remote
+      push eax            ; second arg
+      mov eax, pGUID      ; pointer to command line GUID
+      push eax            ; first arg
+      call isEqualGUID    ; guid compare
+      add esp, 0x8        ; fix up stack
+      cmp eax, 1          ; check if guids are equal
+      jne original_fail   ; if not, do original code but force its comparison to fail
+      xor eax, eax        ; if true, make the compare succeed
+      test eax, eax       ; set the compare
+      jmp cleanup         ; jump to the end
+    original_fail:
+      mov eax, 1          ; make the compare fail
+      test eax, eax       ; this is never 0
+      jmp cleanup
+    original:
+      pop eax             ; restore eax
+      test eax, eax       ;  original code required for the jump
+      jmp finish
+    cleanup:
+      pop eax             ; restore eax
+    finish:
+  ]], {
+    pForceSteamworks = locations.pForceSteamworks,
+    pGUID = locations.pGUID,
+    isEqualGUID = pIsEqualGUID,
+    pSessionGUIDs = pSessionGUIDs,
+  })}, nil, 'after')
+end
+
+local pSteamworksGUID = core.allocate(16, true)
+core.writeBytes(pSteamworksGUID, { 0xFB, 0x59, 0xEF, 0xF7, 0x02, 0xFA, 0xCE, 0x45, 0xBC, 0x36, 0x7B, 0xF1, 0xD0, 0xF6, 0xBC, 0xE5, })
+
+
+local pGetGUIDForSelectedProvider, sizeGetGUIDForSelectedProvider = core.AOBScan("83 B9 8C 02 00 00 00"), 7
+log(VERBOSE, string.format("pGetGUIDForSelectedProvider: %X", pGetGUIDForSelectedProvider))
+local function insertGetGUIDForSelectedProviderHook()
+  core.insertCode(pGetGUIDForSelectedProvider, sizeGetGUIDForSelectedProvider, {
+    core.AssemblyLambda([[
+      mov eax, dword [pForceSteamworks] ; if force steamworks
+      cmp eax, 0
+      je original
+
+      mov eax, dword [esp + 4] ; first parameter contains guid pointer (destination)
+      push ecx
+      mov ecx, dword [pSteamworksGUID]
+      mov dword [eax], ecx
+      mov ecx, dword [pSteamworksGUID + 0x4]
+      mov dword [eax + 0x4], ecx
+      mov ecx, dword [pSteamworksGUID + 0x8]
+      mov dword [eax + 0x8], ecx
+      mov ecx, dword [pSteamworksGUID + 0xC]
+      mov dword [eax + 0xC], ecx
+    cleanup:
+      pop ecx
+      ret 0x4
+    original:
+    ]], {
+      pSteamworksGUID = pSteamworksGUID,
+      pForceSteamworks = locations.pForceSteamworks,
+    })
+  },nil, "after")
+end
+
+local pDisconnectDPlayHook, sizeDisconnectDPlayHook = core.AOBScan("89 AE 8C 02 00 00"), 6
+log(VERBOSE, string.format("pDisconnectDPlayHook: %X", pDisconnectDPlayHook))
+local function insertDisconnectDPlayHook()
+  core.insertCode(pDisconnectDPlayHook, sizeDisconnectDPlayHook, {
+    core.AssemblyLambda([[
+        mov dword [pForceSteamworks], ebp ; set to false or 0 if multiplayer is over
+      ]], {
+      pForceSteamworks = locations.pForceSteamworks,
+    })
+  }, nil, "after")
+end
+
+local pHandleCommandLineArgumentsEvent, sizeHandleCommandLineArgumentsEvent = core.AOBScan("8B 8C 24 14 04 00 00"), 7
+
+local pLoopImprovementInsert, sizeLoopImprovementInsert = core.AOBScan("3B ? ? ? ? ? 0F ? ? ? ? ? 5F 8B 4C 24 58"), 6
+
+local function insertLoopImprovement()
+  core.insertCode(pLoopImprovementInsert, sizeLoopImprovementInsert,
+  {
+    core.AssemblyLambda([[
+      mov eax, dword [pMultiplayerInitStep]
+      cmp eax, 2
+      jl original
+    doBreak:
+      jmp breakPoint
+    original:
+    ]], {
+      pMultiplayerInitStep = pMultiplayerInitStep,
+      breakPoint = pLoopImprovementInsert + 6 + 6,
+    })
+  }, nil, 'after')
+end
 
 return {
   enable = function(self, config)
@@ -75,9 +234,38 @@ return {
 --    self.steamApiHandle = steamApiHandle
     installDPLAYXHook()
 
+    locations = allocateDataLocations()
 
+    core.detourCode(function(registers)
+      log(VERBOSE, string.format("handling command line arguments"))
+      local lobbyID = detectSteamLobbyConnectArguments()
+      if lobbyID ~= nil then
+        local guidBytes = lobbyIDToGUIDBytes(lobbyID)
+        core.writeBytes(locations.pGUID, guidBytes)
+        core.writeInteger(locations.pForceSteamworks, 1) -- force is to true
+        log(VERBOSE, string.format("wrote lobby id to memory: %s GUID=%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X", lobbyID, table.unpack(guidBytes)))
 
-    ui.initialize()
+        core.writeInteger(pIsHost, 0)
+        core.writeInteger(pNextModalDialog, WAITING_FOR_HOST)
+        _switchToMenu(pGameCore, 19, 0) -- MP_CONNECTION
+        core.writeInteger(pMultiplayerInitStep, 0)
+      else
+        log(VERBOSE, string.format("no +connect_lobby argument found"))
+      end
+    end, pHandleCommandLineArgumentsEvent, sizeHandleCommandLineArgumentsEvent)
+    
+
+    insertPostLobbyNameCompareHook()
+    insertGetGUIDForSelectedProviderHook()
+    insertDisconnectDPlayHook()
+    insertLoopImprovement()
+
+    local o
+    o = core.hookCode(function(this, join)
+      log(WARNING, string.format("createOrJoinSession(join=%s)", join))
+      log(WARNING, string.format("multiplayerInitStep: %s", core.readInteger(pMultiplayerInitStep)))
+      return o(this, join)
+    end, core.AOBScan("83 EC 5C A1 ? ? ? ? 33 C4 89 44 24 58 53"), 2, 1, 3 + 5)
   end,
 
   disable = function(self, config)
