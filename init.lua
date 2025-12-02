@@ -285,7 +285,8 @@ return {
       if host then
         core.writeInteger(locations.pForceSteamworks, 1) -- force is to true
 
-        log(VERBOSE, string.format("creating multiplayer lobby data (faux)"))
+        log(VERBOSE, string.format("creating multiplayer lobby data"))
+        core.writeInteger(pIsHost, 1)
         _createMultiplayerLobbyData(pGameSynchronyState)
 
         
@@ -296,7 +297,12 @@ return {
           core.writeInteger(pIsHost, 0)
           log(VERBOSE, string.format("initialize direct play (faux)"))
           local ret = _createOrJoinSession(pGameSynchronyState, 0) -- we pass the JOIN argument to hack around RedirectPlay in case of a lobby id
-        
+          if ret < 0 then
+            local errMsg = string.format("createOrJoinSession(JOIN) => 0x%X", ret)
+            log(ERROR, errMsg)
+            error(errMsg)
+          end
+
           local guidBytes = lobbyIDToGUIDBytes(lobbyID)
           core.writeBytes(pCurrentSessionGUID, guidBytes)
           core.writeBytes(locations.pGUID, guidBytes)
@@ -309,10 +315,12 @@ return {
         
         log(VERBOSE, string.format("creating or joining session"))
         local ret = _createOrJoinSession(pGameSynchronyState, hostOrJoin) -- we pass the JOIN argument to hack around RedirectPlay in case of a lobby id
+        local errMsg = string.format("createOrJoinSession(JOIN) => 0x%X", ret)
         if ret < 0 then
-          local errMsg = string.format("createOrJoinSession(JOIN) => 0x%X", ret)
           log(ERROR, errMsg)
           error(errMsg)
+        else
+          log(VERBOSE, errMsg)
         end
 
         core.writeInteger(pHostRelevant1, 1)
