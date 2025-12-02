@@ -42,6 +42,7 @@ end
 local dplayxHandle = core.openLibraryHandle("ucp/modules/steam-multiplayer/RedirectPlay.dll")
 
 local function installDPLAYXHook()
+  -- 0x00487501
   local hookAddr, hookSize = core.AOBScan("E8 ? ? ? ? 85 C0 0F ? ? ? ? ? 8B 44 24 0C 8B 08"), 5
   core.writeCode(hookAddr, {0x90, 0x90, 0x90, 0x90, 0x90})
   core.writeCode(hookAddr, {core.AssemblyLambda([[
@@ -51,14 +52,29 @@ local function installDPLAYXHook()
   })})
 end
 
+---@class SteamLobbyConnectArguments
+---@field lobbyID number
+---@field host boolean
+
+---@return SteamLobbyConnectArguments
 local function detectSteamLobbyConnectArguments()
+  ---@type SteamLobbyConnectArguments
+  local data = {
+    lobbyID = -1,
+    host = false,
+  }
   -- arg is a global specifying the raw arguments of the process
   for index, a in ipairs(arg) do
     if a == "+connect_lobby" then
-      return tonumber(arg[index + 1]) -- lobby id: e.g. 109775243988447845 (middle part of steam://joinlobby/16700/109775243988447845/more numbers)
+      data.lobbyID = tonumber(arg[index+1]) -- lobby id: e.g. 109775243988447845 (middle part of steam://joinlobby/16700/109775243988447845/more numbers)
+    elseif a == "+lobby_host" then
+      data.host = true
     end
   end
-  return nil
+
+  log(INFO, string.format("detected steam arguments: %s", json:encode(data)))
+
+  return data
 end
 
 local function lobbyIDToGUIDBytes(lobbyID)
@@ -221,6 +237,29 @@ local function insertLoopImprovement()
   }, nil, 'after')
 end
 
+local pCreateOrJoinSession = core.AOBScan("83 EC 5C A1 ? ? ? ? 33 C4 89 44 24 58 53")
+local _, pGameSynchronyState = utils.AOBExtract("B9 I(? ? ? ?) E8 ? ? ? ? 85 C0 0F ? ? ? ? ? 56 6A 14")
+local _createOrJoinSession = core.exposeCode(pCreateOrJoinSession, 2, 1)
+
+local pCreateMultiplayerLobbyData = core.AOBScan("81 EC E4 01 00 00")
+local _createMultiplayerLobbyData = core.exposeCode(pCreateMultiplayerLobbyData, 1, 1) -- synchronystate
+
+local _, pHostRelevant1, pNextTab = utils.AOBExtract("C7 ? I(? ? ? ?) ? ? ? ? 89 ? I(? ? ? ?) E8 ? ? ? ? E8 ? ? ? ? B9 ? ? ? ?")
+local pInitSkirmishLobbyData = core.AOBScan("53 56 57 B9 ? ? ? ? E8 ? ? ? ?")
+local _initSkirmishLobbyData = core.exposeCode(pInitSkirmishLobbyData, 0, 0)
+local _, pThousand = utils.AOBExtract("89 ? I(? ? ? ?) E8 ? ? ? ? B9 ? ? ? ? E8 ? ? ? ? 6A 04")
+local pWaitForMultiplayerHost = core.AOBScan("56 8B F1 B8 01 00 00 00 89 86 18 06 00 00")
+local _waitForMultiplayerHost = core.exposeCode(pWaitForMultiplayerHost, 1, 1) -- synchronystate
+
+local pResetTeams = core.AOBScan("C7 81 90 24 05 00 00 00 00 00")
+local _, pGameState = utils.AOBExtract("B9 I(? ? ? ?) E8 ? ? ? ? 6A 04 B9 ? ? ? ? E8 ? ? ? ? E9 ? ? ? ?")
+local _resetTeams = core.exposeCode(pResetTeams, 1, 1) -- game state
+local pQueueCommand = core.AOBScan("53 56 8B F1 8B 86 E0 9E 10 00 89 86 24 D8 02 00 69 C0 F8 04 00 00 57 8D 84 30 86 C6 03 00 50 33 FF 57 68 EC 04 00 00 B9 ? ? ? ? E8 ? ? ? ? 8B 8E 24 D8 02 00 69 C9 F8 04 00 00 C6 84 31 85 C6 03 00 01 8B 96 24 D8 02 00 8B 86 A4 06 00 00 69 D2 F8 04 00 00 8B 5C 24 10")
+local ASK_FOR_SLOT_ASSIGNMENT = 4
+local _queueCommand = core.exposeCode(pQueueCommand, 2, 1) -- synchronystate TODO: use protocol module
+
+local _, pCurrentSessionGUID = utils.AOBExtract("89 ? I(? ? ? ?) 8B ? ? ? ? ? 89 ? ? ? ? ? 8B ? ? ? ? ? A3 ? ? ? ? 89 ? ? ? ? ? 89 ? ? ? ? ? 89 86 7C 02 00 00")
+
 return {
   enable = function(self, config)
 
@@ -238,19 +277,74 @@ return {
 
     core.detourCode(function(registers)
       log(VERBOSE, string.format("handling command line arguments"))
-      local lobbyID = detectSteamLobbyConnectArguments()
-      if lobbyID ~= nil then
-        local guidBytes = lobbyIDToGUIDBytes(lobbyID)
-        core.writeBytes(locations.pGUID, guidBytes)
+      local steamParameters = detectSteamLobbyConnectArguments()
+      local lobbyID = steamParameters.lobbyID
+      local host = steamParameters.host
+      local hasLobbyID = lobbyID ~= nil and lobbyID ~= -1
+      
+      if host then
         core.writeInteger(locations.pForceSteamworks, 1) -- force is to true
-        log(VERBOSE, string.format("wrote lobby id to memory: %s GUID=%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X", lobbyID, table.unpack(guidBytes)))
 
-        core.writeInteger(pIsHost, 0)
-        core.writeInteger(pNextModalDialog, WAITING_FOR_HOST)
-        _switchToMenu(pGameCore, 19, 0) -- MP_CONNECTION
-        core.writeInteger(pMultiplayerInitStep, 0)
+        log(VERBOSE, string.format("creating multiplayer lobby data (faux)"))
+        _createMultiplayerLobbyData(pGameSynchronyState)
+
+        
+        if hasLobbyID then
+          --[[
+            some hacky code to get a direct play interface up and running for joining
+          --]]
+          core.writeInteger(pIsHost, 0)
+          log(VERBOSE, string.format("initialize direct play (faux)"))
+          local ret = _createOrJoinSession(pGameSynchronyState, 0) -- we pass the JOIN argument to hack around RedirectPlay in case of a lobby id
+        
+          local guidBytes = lobbyIDToGUIDBytes(lobbyID)
+          core.writeBytes(pCurrentSessionGUID, guidBytes)
+          core.writeBytes(locations.pGUID, guidBytes)
+        end
+        
+        core.writeInteger(pIsHost, 1)
+
+        local hostOrJoin = 0 -- host
+        if hasLobbyID then hostOrJoin = 1 end
+        
+        log(VERBOSE, string.format("creating or joining session"))
+        local ret = _createOrJoinSession(pGameSynchronyState, hostOrJoin) -- we pass the JOIN argument to hack around RedirectPlay in case of a lobby id
+        if ret < 0 then
+          local errMsg = string.format("createOrJoinSession(JOIN) => 0x%X", ret)
+          log(ERROR, errMsg)
+          error(errMsg)
+        end
+
+        core.writeInteger(pHostRelevant1, 1)
+        core.writeInteger(pNextTab, 0)
+        log(VERBOSE, string.format("switching to menu"))
+        _switchToMenu(pGameCore, 20, 0) -- LOBBY_MENU
+        log(VERBOSE, string.format("init skirmish lobby data"))
+        _initSkirmishLobbyData()
+        core.writeInteger(pThousand, 0)
+        log(VERBOSE, string.format("waiting for multiplayer host"))
+        _waitForMultiplayerHost(pGameSynchronyState)
+        log(VERBOSE, string.format("resetting teams"))
+        _resetTeams(pGameState)
+        log(VERBOSE, string.format("asking for slot assignment"))
+        _queueCommand(pGameSynchronyState, ASK_FOR_SLOT_ASSIGNMENT)
+
       else
-        log(VERBOSE, string.format("no +connect_lobby argument found"))
+        if hasLobbyID then
+          core.writeInteger(locations.pForceSteamworks, 1) -- force is to true
+          
+          local guidBytes = lobbyIDToGUIDBytes(lobbyID)
+          core.writeBytes(locations.pGUID, guidBytes)
+          
+          log(VERBOSE, string.format("wrote lobby id to memory: %s GUID=%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X", lobbyID, table.unpack(guidBytes)))
+
+          core.writeInteger(pIsHost, 0)
+          core.writeInteger(pNextModalDialog, WAITING_FOR_HOST)
+          _switchToMenu(pGameCore, 19, 0) -- MP_CONNECTION
+          core.writeInteger(pMultiplayerInitStep, 0)
+        else
+          log(INFO, "no steam multiplayer arguments found")
+        end
       end
     end, pHandleCommandLineArgumentsEvent, sizeHandleCommandLineArgumentsEvent)
     
