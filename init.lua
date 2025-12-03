@@ -135,6 +135,24 @@ log(VERBOSE, string.format("pPostLobbyNameCompare: %X", pPostLobbyNameCompare))
 
 local _, pSessionGUIDs = utils.AOBExtract("8B ? ? I(? ? ? ?) 8B 08 89 ? ? ? ? ? ")
 
+local function insertBootImprovement()
+  local addr = core.AOBScan("39 ? ? ? ? ? 75 0A B9 ? ? ? ? E8 ? ? ? ? 68 90 01 00 00")
+  local size = 6
+  core.insertCode(addr, size, {
+    core.AssemblyLambda([[
+      cmp dword [pForceSteamworks], 0
+      jne skip
+      
+      finish:
+    ]], {
+      pForceSteamworks = locations.pForceSteamworks,
+      land = addr + size,
+      skip = addr + size + 2 + 5 + 5,
+
+    })
+  }, nil, "after")
+end
+
 local function insertPostLobbyNameCompareHook()
   core.writeCode(pPostLobbyNameCompare, {0x90, 0x90, 0x90, 0x90, 0x90, })
   core.insertCode(pPostLobbyNameCompare, sizePostLobbyNameCompare, {
@@ -271,7 +289,7 @@ local function initializeDirectPlayJoinInterface()
   
   log(VERBOSE, string.format("initialize direct play (faux)"))
   local ret = _createOrJoinSession(pGameSynchronyState, 0) -- we pass the JOIN argument to hack around RedirectPlay in case of a lobby id
-  if ret < 0 then
+  if ret ~= 0 then
     local errMsg = string.format("createOrJoinSession(JOIN) => 0x%X", ret)
     log(ERROR, errMsg)
     error(errMsg)
@@ -287,8 +305,8 @@ local function joinLobbyDirectly(lobbyID)
   log(VERBOSE, string.format("creating or joining session"))
   local ret = _createOrJoinSession(pGameSynchronyState, 1)
   local errMsg = string.format("createOrJoinSession(JOIN) => 0x%X", ret)
-  if ret < 0 then
-    log(ERROR, errMsg)
+  if ret ~= 0 then
+    log(ERROR, string.format("Failed join Lobby %s, does the lobby exist?\n\n%s", lobbyID, errMsg))
     error(errMsg)
   else
     log(VERBOSE, errMsg)
@@ -307,7 +325,7 @@ local function visitLobby()
   _waitForMultiplayerHost(pGameSynchronyState)
   if core.readInteger(pIsHost) == 1 then
     log(VERBOSE, string.format("resetting teams"))
-    _resetTeams(pGameState)
+    log(VERBOSE, _resetTeams(pGameState))
   end
   log(VERBOSE, string.format("asking for slot assignment"))
   _queueCommand(pGameSynchronyState, ASK_FOR_SLOT_ASSIGNMENT)
@@ -339,7 +357,9 @@ return {
         core.writeInteger(locations.pForceSteamworks, 1) -- force is to true
 
         log(VERBOSE, string.format("creating multiplayer lobby data"))
+        
         core.writeInteger(pIsHost, 1)
+
         _createMultiplayerLobbyData(pGameSynchronyState)
 
         
@@ -350,10 +370,12 @@ return {
           core.writeInteger(pIsHost, 0)
           log(VERBOSE, string.format("initialize direct play (faux)"))
           local ret = _createOrJoinSession(pGameSynchronyState, 0) -- we pass the JOIN argument to hack around RedirectPlay in case of a lobby id
-          if ret < 0 then
-            local errMsg = string.format("createOrJoinSession() => 0x%X", ret)
+          local errMsg = string.format("createOrJoinSession() => 0x%X", ret)
+          if ret ~= 0 then
             log(ERROR, errMsg)
             error(errMsg)
+          else
+            log(VERBOSE, errMsg)
           end
 
           local guidBytes = lobbyIDToGUIDBytes(lobbyID)
@@ -369,7 +391,7 @@ return {
         log(VERBOSE, string.format("creating or joining session"))
         local ret = _createOrJoinSession(pGameSynchronyState, hostOrJoin) -- we pass the JOIN argument to hack around RedirectPlay in case of a lobby id
         local errMsg = string.format("createOrJoinSession() => 0x%X", ret)
-        if ret < 0 then
+        if ret ~= 0 then
           log(ERROR, errMsg)
           error(errMsg)
         else
@@ -417,6 +439,7 @@ return {
     insertGetGUIDForSelectedProviderHook()
     insertDisconnectDPlayHook()
     insertLoopImprovement()
+    insertBootImprovement()
 
     local o
     o = core.hookCode(function(this, join)
