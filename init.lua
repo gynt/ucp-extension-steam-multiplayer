@@ -55,6 +55,7 @@ end
 ---@class SteamLobbyConnectArguments
 ---@field lobbyID number
 ---@field host boolean
+---@field joinMethod "enumerated"|"directly"
 
 ---@return SteamLobbyConnectArguments
 local function detectSteamLobbyConnectArguments()
@@ -62,13 +63,18 @@ local function detectSteamLobbyConnectArguments()
   local data = {
     lobbyID = -1,
     host = false,
+    joinMethod = "directly",
   }
   -- arg is a global specifying the raw arguments of the process
   for index, a in ipairs(arg) do
-    if a == "+connect_lobby" then
+    if a == "+connect_lobby" then -- defined by Steam
       data.lobbyID = tonumber(arg[index+1]) -- lobby id: e.g. 109775243988447845 (middle part of steam://joinlobby/16700/109775243988447845/more numbers)
-    elseif a == "+lobby_host" then
+    elseif a == "+lobby_host" or a == "+host_lobby" then
       data.host = true
+    elseif a == "+join_directly" then
+      data.joinMethod = "directly"
+    elseif a == "+join_enumerated" then      
+      data.joinMethod = "enumerated"
     end
   end
 
@@ -260,6 +266,53 @@ local _queueCommand = core.exposeCode(pQueueCommand, 2, 1) -- synchronystate TOD
 
 local _, pCurrentSessionGUID = utils.AOBExtract("89 ? I(? ? ? ?) 8B ? ? ? ? ? 89 ? ? ? ? ? 8B ? ? ? ? ? A3 ? ? ? ? 89 ? ? ? ? ? 89 ? ? ? ? ? 89 86 7C 02 00 00")
 
+local function initializeDirectPlayJoinInterface()
+  core.writeInteger(pIsHost, 0)
+  
+  log(VERBOSE, string.format("initialize direct play (faux)"))
+  local ret = _createOrJoinSession(pGameSynchronyState, 0) -- we pass the JOIN argument to hack around RedirectPlay in case of a lobby id
+  if ret < 0 then
+    local errMsg = string.format("createOrJoinSession(JOIN) => 0x%X", ret)
+    log(ERROR, errMsg)
+    error(errMsg)
+  end
+end
+
+local function joinLobbyDirectly(lobbyID)
+  
+  local guidBytes = lobbyIDToGUIDBytes(lobbyID)
+  core.writeBytes(pCurrentSessionGUID, guidBytes)
+  core.writeBytes(locations.pGUID, guidBytes)
+
+  log(VERBOSE, string.format("creating or joining session"))
+  local ret = _createOrJoinSession(pGameSynchronyState, 1)
+  local errMsg = string.format("createOrJoinSession(JOIN) => 0x%X", ret)
+  if ret < 0 then
+    log(ERROR, errMsg)
+    error(errMsg)
+  else
+    log(VERBOSE, errMsg)
+  end
+end
+
+local function visitLobby()
+  core.writeInteger(pHostRelevant1, 1)
+  core.writeInteger(pNextTab, 0)
+  log(VERBOSE, string.format("switching to menu"))
+  _switchToMenu(pGameCore, 20, 0) -- LOBBY_MENU
+  log(VERBOSE, string.format("init skirmish lobby data"))
+  _initSkirmishLobbyData()
+  core.writeInteger(pThousand, 0)
+  log(VERBOSE, string.format("waiting for multiplayer host"))
+  _waitForMultiplayerHost(pGameSynchronyState)
+  if core.readInteger(pIsHost) == 1 then
+    log(VERBOSE, string.format("resetting teams"))
+    _resetTeams(pGameState)
+  end
+  log(VERBOSE, string.format("asking for slot assignment"))
+  _queueCommand(pGameSynchronyState, ASK_FOR_SLOT_ASSIGNMENT)
+end
+
 return {
   enable = function(self, config)
 
@@ -298,7 +351,7 @@ return {
           log(VERBOSE, string.format("initialize direct play (faux)"))
           local ret = _createOrJoinSession(pGameSynchronyState, 0) -- we pass the JOIN argument to hack around RedirectPlay in case of a lobby id
           if ret < 0 then
-            local errMsg = string.format("createOrJoinSession(JOIN) => 0x%X", ret)
+            local errMsg = string.format("createOrJoinSession() => 0x%X", ret)
             log(ERROR, errMsg)
             error(errMsg)
           end
@@ -315,7 +368,7 @@ return {
         
         log(VERBOSE, string.format("creating or joining session"))
         local ret = _createOrJoinSession(pGameSynchronyState, hostOrJoin) -- we pass the JOIN argument to hack around RedirectPlay in case of a lobby id
-        local errMsg = string.format("createOrJoinSession(JOIN) => 0x%X", ret)
+        local errMsg = string.format("createOrJoinSession() => 0x%X", ret)
         if ret < 0 then
           log(ERROR, errMsg)
           error(errMsg)
@@ -323,33 +376,36 @@ return {
           log(VERBOSE, errMsg)
         end
 
-        core.writeInteger(pHostRelevant1, 1)
-        core.writeInteger(pNextTab, 0)
-        log(VERBOSE, string.format("switching to menu"))
-        _switchToMenu(pGameCore, 20, 0) -- LOBBY_MENU
-        log(VERBOSE, string.format("init skirmish lobby data"))
-        _initSkirmishLobbyData()
-        core.writeInteger(pThousand, 0)
-        log(VERBOSE, string.format("waiting for multiplayer host"))
-        _waitForMultiplayerHost(pGameSynchronyState)
-        log(VERBOSE, string.format("resetting teams"))
-        _resetTeams(pGameState)
-        log(VERBOSE, string.format("asking for slot assignment"))
-        _queueCommand(pGameSynchronyState, ASK_FOR_SLOT_ASSIGNMENT)
+        visitLobby()
 
       else
+        -- joining
         if hasLobbyID then
           core.writeInteger(locations.pForceSteamworks, 1) -- force is to true
           
           local guidBytes = lobbyIDToGUIDBytes(lobbyID)
-          core.writeBytes(locations.pGUID, guidBytes)
-          
-          log(VERBOSE, string.format("wrote lobby id to memory: %s GUID=%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X", lobbyID, table.unpack(guidBytes)))
+          if steamParameters.joinMethod == "enumerated" then
+            core.writeBytes(locations.pGUID, guidBytes)
+            
+            log(VERBOSE, string.format("wrote lobby id to memory: %s GUID=%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X", lobbyID, table.unpack(guidBytes)))
 
-          core.writeInteger(pIsHost, 0)
-          core.writeInteger(pNextModalDialog, WAITING_FOR_HOST)
-          _switchToMenu(pGameCore, 19, 0) -- MP_CONNECTION
-          core.writeInteger(pMultiplayerInitStep, 0)
+            core.writeInteger(pIsHost, 0)
+            core.writeInteger(pNextModalDialog, WAITING_FOR_HOST)
+            _switchToMenu(pGameCore, 19, 0) -- MP_CONNECTION
+            core.writeInteger(pMultiplayerInitStep, 0)
+          elseif steamParameters.joinMethod == "directly" then
+            
+            core.writeInteger(pIsHost, 0)
+
+            _createMultiplayerLobbyData(pGameSynchronyState)
+            initializeDirectPlayJoinInterface()
+            joinLobbyDirectly(lobbyID)
+
+            visitLobby()
+          else
+            log(ERROR, string.format("unknown join method: %s", steamParameters.joinMethod))
+          end
+
         else
           log(INFO, "no steam multiplayer arguments found")
         end

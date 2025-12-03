@@ -16,6 +16,14 @@ To join a lobby, you can also click on the "join game" link found on a Steam pro
 
 As a host, first create a multiplayer lobby (see above), then open the Steam overlay (shift+tab) and click on your name/icon to navigate to your profile page. Then, right click the "join game" button and copy the link. Send this link to the people you want to play with. When they click it, Steam opens the game and the game immediately connects to the lobby.
 
+### From the command line
+
+These are the command line options:
+- `+connect_lobby <lobby id>` Added by Steam. The lobby id is a uint64.
+- `+host_lobby` Claim host, everyone waits for you to join the lobby
+- `+join_directly` Use the `<lobby id>` to directly join to the lobby at launch without enumerating available lobbies (and therefore non nice GUI). The UI can seem frozen if the host isn't responding yet. Preferred method for invite-only (private) lobbies.
+- `+join_enumerated` Enumerate lobbies and compare the `<lobby id>` to them, if a match, join the lobby. Only works for public and friend-lobbies.
+
 ## Known issues
 1. People joining a public lobby without a password may crash an ongoing game.
 2. The pop-up window may be hidden behind the game window, requiring alt+tab to see it.
