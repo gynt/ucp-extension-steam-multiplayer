@@ -69,7 +69,7 @@ local function detectSteamLobbyConnectArguments()
   for index, a in ipairs(arg) do
     if a == "+connect_lobby" then -- defined by Steam
       data.lobbyID = tonumber(arg[index+1]) -- lobby id: e.g. 109775243988447845 (middle part of steam://joinlobby/16700/109775243988447845/more numbers)
-    elseif a == "+lobby_host" or a == "+host_lobby" then
+    elseif a == "+lobby_host" or a == "+host_lobby" or a == "+host_game" then
       data.host = true
     elseif a == "+join_directly" then
       data.joinMethod = "directly"
@@ -275,10 +275,10 @@ local _, pThousand = utils.AOBExtract("89 ? I(? ? ? ?) E8 ? ? ? ? B9 ? ? ? ? E8 
 local pWaitForMultiplayerHost = core.AOBScan("56 8B F1 B8 01 00 00 00 89 86 18 06 00 00")
 local _waitForMultiplayerHost = core.exposeCode(pWaitForMultiplayerHost, 1, 1) -- synchronystate
 
-local pResetTeams = core.AOBScan("C7 81 90 24 05 00 00 00 00 00")
+local pResetTeams = core.AOBScan("C7 81 ? ? ? ? 00 00 00 00 C7 81 ? ? ? ? 01 00 00 00 C7 81 ? ? ? ? 02 00 00 00")
 local _, pGameState = utils.AOBExtract("B9 I(? ? ? ?) E8 ? ? ? ? 6A 04 B9 ? ? ? ? E8 ? ? ? ? E9 ? ? ? ?")
 local _resetTeams = core.exposeCode(pResetTeams, 1, 1) -- game state
-local pQueueCommand = core.AOBScan("53 56 8B F1 8B 86 E0 9E 10 00 89 86 24 D8 02 00 69 C0 F8 04 00 00 57 8D 84 30 86 C6 03 00 50 33 FF 57 68 EC 04 00 00 B9 ? ? ? ? E8 ? ? ? ? 8B 8E 24 D8 02 00 69 C9 F8 04 00 00 C6 84 31 85 C6 03 00 01 8B 96 24 D8 02 00 8B 86 A4 06 00 00 69 D2 F8 04 00 00 8B 5C 24 10")
+local pQueueCommand = core.AOBScan("53 56 8B F1 8B 86 ? ? ? ? 89 86 ? ? ? ? 69 C0 F8 04 00 00 57 8D 84 30 ? ? ? ? 50 33 FF 57 68 EC 04 00 00 B9 ? ? ? ? E8 ? ? ? ? 8B 8E ? ? ? ? 69 C9 F8 04 00 00 C6 84 31 ? ? ? ? 01 8B 96 ? ? ? ? 8B 86 ? ? ? ? 69 D2 F8 04 00 00 8B 5C 24 10")
 local ASK_FOR_SLOT_ASSIGNMENT = 4
 local _queueCommand = core.exposeCode(pQueueCommand, 2, 1) -- synchronystate TODO: use protocol module
 
@@ -392,6 +392,9 @@ return {
         local ret = _createOrJoinSession(pGameSynchronyState, hostOrJoin) -- we pass the JOIN argument to hack around RedirectPlay in case of a lobby id
         local errMsg = string.format("createOrJoinSession() => 0x%X", ret)
         if ret ~= 0 then
+          if ret == 0x887700FA then
+            errMsg = errMsg .. "\nIs Steam running?"
+          end
           log(ERROR, errMsg)
           error(errMsg)
         else

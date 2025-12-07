@@ -20,7 +20,7 @@ As a host, first create a multiplayer lobby (see above), then open the Steam ove
 
 These are the command line options:
 - `+connect_lobby <lobby id>` Added by Steam. The lobby id is a uint64.
-- `+host_lobby` Claim host, everyone waits for you to join the lobby
+- `+host_game` Claim host, everyone waits for you to join the lobby. If no lobby was specified via `+connect_lobby`, create a lobby.
 - `+join_directly` Use the `<lobby id>` to directly join to the lobby at launch without enumerating available lobbies (and therefore non nice GUI). The UI can seem frozen if the host isn't responding yet. Preferred method for invite-only (private) lobbies.
 - `+join_enumerated` Enumerate lobbies and compare the `<lobby id>` to them, if a match, join the lobby. Only works for public and friend-lobbies.
 
